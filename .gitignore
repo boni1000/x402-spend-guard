@@ -1,0 +1,17 @@
+# secrets and local state: never commit
+keys.env
+*.env
+!*.env.example
+*.pw
+*.wallet
+journal-*.sqlite
+*.sqlite
+runs/
+# build and tooling
+contract/*.wasm
+contract/*.abi
+__pycache__/
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "x402-spend-guard"
+version = "0.1.0"
+description = "Spending limits, human approval and two-way audit for AI agents that pay with x402, enforced by an Antelope smart contract"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+  "x402[evm,httpx,mcp]==2.25.0",
+  "web3>=7",
+  "httpx>=0.28",
+]
+
+[project.optional-dependencies]
+examples = ["fastapi>=0.115", "uvicorn>=0.30"]
+test = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+spend-guard-mcp = "spend_guard.mcp_server:main"
+spend-guard-watcher = "spend_guard.watcher:main"
+spend-guard-audit = "spend_guard.auditor:main"
+
+[tool.setuptools]
+packages = ["spend_guard"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
