@@ -18,7 +18,6 @@ import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 OLLAMA = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 DEFAULT_MODEL = os.environ.get("AGENT_MODEL", "qwen2.5:7b-instruct")
 
@@ -31,9 +30,9 @@ SYSTEM = (
 
 
 def to_ollama_tool(t):
+    schema = getattr(t, "input_schema", None) or getattr(t, "inputSchema", None)
     return {"type": "function", "function": {"name": t.name, "description": t.description or "",
-                                             "parameters": getattr(t, "input_schema", None) or getattr(t, "inputSchema", None)
-                                             or {"type": "object", "properties": {}}}}
+                                             "parameters": schema or {"type": "object", "properties": {}}}}
 
 
 def tool_payload(result):
@@ -60,7 +59,8 @@ async def ollama_chat(model, messages, tools):
 def server_params(agent):
     # Starts the gateway's MCP server over stdio, from the working directory with your .env files.
     env = dict(os.environ, AGENT=agent, JOURNAL=f"journal-{agent}.sqlite")
-    return StdioServerParameters(command=sys.executable, args=["-m", "spend_guard.mcp_server"], cwd=os.getcwd(), env=env)
+    return StdioServerParameters(command=sys.executable, args=["-m", "spend_guard.mcp_server"],
+                                 cwd=os.getcwd(), env=env)
 
 
 async def run(agent, task, model=DEFAULT_MODEL, max_steps=10, label="task"):

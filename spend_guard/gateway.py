@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import time
 from dataclasses import dataclass
 
@@ -28,9 +29,12 @@ RETRYABLE = {"invalid_exact_evm_transaction_failed"}   # facilitator could not e
 MAX_ATTEMPTS = 3
 STATUS = {1: "authorized", 2: "pending_approval", 3: "approved", 4: "rejected",
           5: "settled", 6: "failed", 7: "expired"}
+# agentgov::settle errors that retrying cannot fix
+SETTLE_PERMANENT = ("unknown request", "not your request", "not authorized for payment",
+                    "invalid transaction id", "network does not match vendor", "transaction already recorded")
+
 # Block explorer for transaction links, by CAIP-2 network (override with EXPLORER_TX_URL).
 EXPLORERS = {"eip155:84532": "https://sepolia.basescan.org/tx/", "eip155:8453": "https://basescan.org/tx/"}
-EXPLORER = os.environ.get("EXPLORER_TX_URL") or EXPLORERS.get(os.environ.get("NETWORK", "eip155:84532"), "")
 
 
 def load_env(path):
@@ -82,14 +86,18 @@ class Gateway:
         self.payer = X402Payer(cfg.payer_key, cfg.network)
         self.base = BaseVerifier(cfg.rpc, cfg.usdc)
         self.journal = Journal(cfg.journal_path)
-        self._counter = 0
         pol = self.spring.table("policies", lower=cfg.agent, upper=cfg.agent, limit=1)
         self.payer.set_cap(int(pol[0]["per_tx_max"]) / 1e6 if pol else 0.0)
 
     # ------------------------------------------------------------------ helpers
-    def _nonce(self):
-        self._counter = (self._counter + 1) % 1000
-        return int(time.time() * 1000) * 1000 + self._counter
+    @staticmethod
+    def _nonce():
+        # Microseconds plus a random part: unique across processes acting for the same agent.
+        return int(time.time() * 1_000_000) * 1000 + secrets.randbelow(1000)
+
+    def _explorer(self, tx):
+        base = os.environ.get("EXPLORER_TX_URL") or EXPLORERS.get(self.cfg.network, "")
+        return base + tx if base else tx
 
     def _push(self, action, data):
         return self.spring.push(action, data, self.cfg.agent, self.cfg.permission)
@@ -142,8 +150,8 @@ class Gateway:
 
         self._t["quoted"] = time.time()
         nonce = self._nonce()
-        self.journal.insert(nonce, self.cfg.agent, url, acc.model_dump(mode="json", by_alias=True), amount, vendor["id"],
-                            "authorizing")
+        self.journal.insert(nonce, self.cfg.agent, url, acc.model_dump(mode="json", by_alias=True), amount,
+                            vendor["id"], "authorizing")
         res = await self._push_confirmed("authorize", [self.cfg.agent, vendor["id"], amount,
                                                         self._params_hash(url, acc), nonce])
         if not res["ok"]:
@@ -199,7 +207,8 @@ class Gateway:
             if not retryable or attempt == MAX_ATTEMPTS:
                 break
             # Retry only if this exact signed payment was NOT executed after all.
-            found_tx = await asyncio.to_thread(self.base.authorization_used, self.payer.address, auth_nonce, base_block)
+            found_tx = await asyncio.to_thread(self.base.authorization_used, self.payer.address, auth_nonce,
+                                               base_block)
             if found_tx or await asyncio.to_thread(self._seconds_left, row) < 20:
                 break
             log.warning("request %s: facilitator refused attempt %s (%s); retrying", req_id, attempt,
@@ -211,7 +220,7 @@ class Gateway:
                 res = await self._push_confirmed("settle", [self.cfg.agent, req_id, acc.network, found_tx])
                 self.journal.update(nonce, ext_tx=found_tx, phase="settled" if res["ok"] else "paid_not_recorded")
                 return {"status": "paid", "request_id": req_id, "price": usdc(amount), "tx": found_tx,
-                        "explorer": EXPLORER + found_tx, "content": "",
+                        "explorer": self._explorer(found_tx), "content": "",
                         "warning": "paid, but the vendor reported a failure and delivered no content"}
         self._t["paid"] = time.time()
         if r.status_code == 200 and settle and settle.success:
@@ -228,7 +237,7 @@ class Gateway:
             self.journal.update(nonce, phase="settled" if res["ok"] else "paid_not_recorded",
                                 error=None if res["ok"] else res["error"])
             out = {"status": "paid", "request_id": req_id, "price": usdc(amount), "tx": tx,
-                   "explorer": EXPLORER + tx, "content": r.text[:4000], "timing": self._timing(),
+                   "explorer": self._explorer(tx), "content": r.text[:4000], "timing": self._timing(),
                    "attempts": len(attempts)}
             if not res["ok"]:
                 out["warning"] = "paid, but not yet recorded on chain; the reconciler will retry"
@@ -273,7 +282,7 @@ class Gateway:
                "url": j.get("url")}
         if row["ext_txid"]:
             out["tx"] = row["ext_txid"]
-            out["explorer"] = EXPLORER + row["ext_txid"]
+            out["explorer"] = self._explorer(row["ext_txid"])
         if row["status"] == 5 and j.get("content"):
             out["content"] = j["content"][:4000]
         return out
@@ -304,6 +313,10 @@ class Gateway:
             row = await asyncio.to_thread(self.spring.req_by_id, j["req_id"])
             if row["status"] != 3:
                 continue
+            # Claim the request first: if another process (e.g. a second watcher or an MCP server)
+            # handles the same journal, only one of them may pay.
+            if not self.journal.claim(j["nonce"], "pending_approval", "authorized"):
+                continue
             authorized = PaymentRequirements.model_validate(json.loads(j["accepted"]))
             pr, _ = await self.payer.quote(j["url"])
             acc = self.payer.choose(pr) if pr else None
@@ -311,7 +324,6 @@ class Gateway:
                 await self._push_confirmed("fail", [self.cfg.agent, row["id"], "vendor price or terms changed"])
                 self.journal.update(j["nonce"], phase="failed", error="vendor price or terms changed")
                 continue
-            self.journal.update(j["nonce"], phase="authorized")
             result = await self._pay(j["nonce"], row, j["url"], pr, acc)
             log.info("approved request %s: %s", row["id"], result["status"])
 
@@ -322,6 +334,10 @@ class Gateway:
             res = await self._push_confirmed("settle", [self.cfg.agent, j["req_id"], acc["network"], j["ext_tx"]])
             if res["ok"]:
                 self.journal.update(j["nonce"], phase="settled", error=None)
+            elif any(m in res["error"] for m in SETTLE_PERMANENT):
+                # The chain will never accept this settlement: stop retrying and flag it for a person.
+                self.journal.update(j["nonce"], phase="needs_attention", error=res["error"])
+                log.error("request %s: settlement refused permanently: %s", j["req_id"], res["error"])
         now = time.time()
         for j in self.journal.by_phase("payment_unknown", "paying", "authorized"):
             acc = json.loads(j["accepted"])
@@ -329,13 +345,25 @@ class Gateway:
             # payment in flight is never declared failed before then.
             if now - j["updated"] < int(acc.get("maxTimeoutSeconds", 300)) + 60:
                 continue
-            tx = j["ext_tx"] or await asyncio.to_thread(self.base.find_transfer, self.payer.address,
-                                                        acc["payTo"], j["amount"], j["base_block"] or 0)
+            tx = j["ext_tx"]
+            if not tx and j["base_block"]:   # a payment was started: look for it on the public chain
+                # Exact: by the authorization nonce of each attempt. Fallback (journals written before
+                # attempts were recorded): by amount and payee.
+                for auth_nonce in json.loads(j.get("attempts") or "[]"):
+                    tx = await asyncio.to_thread(self.base.authorization_used, self.payer.address, auth_nonce,
+                                                 j["base_block"])
+                    if tx:
+                        break
+                if not tx and not j.get("attempts"):
+                    tx = await asyncio.to_thread(self.base.find_transfer, self.payer.address, acc["payTo"],
+                                                 j["amount"], j["base_block"])
             if tx:
-                ok, _ = await asyncio.to_thread(self.base.verify, tx, self.payer.address, acc["payTo"], j["amount"])
+                ok, _ = await asyncio.to_thread(self.base.verify, tx, self.payer.address, acc["payTo"],
+                                                j["amount"])
                 if ok:
                     res = await self._push_confirmed("settle", [self.cfg.agent, j["req_id"], acc["network"], tx])
-                    self.journal.update(j["nonce"], ext_tx=tx, phase="settled" if res["ok"] else "paid_not_recorded")
+                    self.journal.update(j["nonce"], ext_tx=tx,
+                                        phase="settled" if res["ok"] else "paid_not_recorded")
                     continue
             row = await asyncio.to_thread(self.spring.req_by_id, j["req_id"])
             if row and row["status"] in (1, 3):

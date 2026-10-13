@@ -1,8 +1,7 @@
 """Gateway logic tests with a simulated chain and payer (no network, no keys)."""
+import asyncio
 import json
 from types import SimpleNamespace
-
-import pytest
 
 from spend_guard.gateway import Gateway, Config
 from spend_guard.journal import Journal
@@ -57,6 +56,9 @@ class FakeChain:
     def wait_included(self, trx_id, start_block, timeout=None):
         return 1
 
+    def wait_irreversible(self, block_num, timeout=None):
+        return True
+
     def req_by_nonce(self, agent, nonce):
         return next((r for r in self.reqs if r["nonce"] == nonce), None)
 
@@ -98,8 +100,8 @@ class FakePayer:
 
 
 class FakeBase:
-    def __init__(self, verified=True):
-        self.verified = verified
+    def __init__(self, verified=True, used=None):
+        self.verified, self.used, self.searched = verified, used or {}, []
 
     def block_number(self):
         return 100
@@ -108,6 +110,11 @@ class FakeBase:
         return self.verified, 101
 
     def authorization_used(self, authorizer, nonce, from_block):
+        self.searched.append(("nonce", nonce, from_block))
+        return self.used.get(nonce)
+
+    def find_transfer(self, payer, pay_to, amount, from_block):
+        self.searched.append(("transfer", amount, from_block))
         return None
 
 
@@ -117,7 +124,6 @@ def make_gateway(tmp_path, chain, payer, base=None):
                     str(tmp_path / "journal.sqlite"))
     gw.spring, gw.payer, gw.base = chain, payer, base or FakeBase()
     gw.journal = Journal(gw.cfg.journal_path)
-    gw._counter = 0
     return gw
 
 
@@ -200,3 +206,71 @@ def test_journal_keeps_attempt_nonces(tmp_path):
     j.insert(1, "agent1", "http://x", {"a": 1}, 10, 0, "authorizing")
     j.update(1, attempts=json.dumps(["0x1", "0x2"]))
     assert json.loads(j.get(1)["attempts"]) == ["0x1", "0x2"]
+
+
+def test_journal_claim_succeeds_only_once(tmp_path):
+    path = str(tmp_path / "j.sqlite")
+    a, b = Journal(path), Journal(path)   # two processes sharing one journal
+    a.insert(1, "agent1", "http://x", {}, 10, 0, "pending_approval")
+    assert a.claim(1, "pending_approval", "authorized") is True
+    assert b.claim(1, "pending_approval", "authorized") is False
+    assert b.get(1)["phase"] == "authorized"
+
+
+async def test_approved_payment_is_paid_once_by_two_watchers(tmp_path):
+    chain = FakeChain()
+    payer = FakePayer(1_500_000)
+    gw1 = make_gateway(tmp_path, chain, payer)
+    res = await gw1.paid_fetch("http://vendor/report", 2)
+    assert res["status"] == "pending_approval"
+    chain.reqs[0]["status"] = 3                      # approved
+    gw2 = make_gateway(tmp_path, chain, payer)       # second process, same journal
+    await asyncio.gather(gw1.process_approved(), gw2.process_approved())   # both see the approval
+    assert payer.paid == ["ok"] and chain.reqs[0]["status"] == 5
+
+
+def _stale(gw, nonce, **fields):
+    """Make a journal entry look older than the x402 payment window."""
+    gw.journal.update(nonce, **fields)
+    gw.journal.db.execute("update requests set updated = updated - 1000 where nonce = ?", (nonce,))
+    gw.journal.db.commit()
+
+
+async def test_reconciler_settles_an_interrupted_payment_found_by_its_nonce(tmp_path):
+    chain = FakeChain()
+    tx = "0x" + "cd" * 32
+    base = FakeBase(used={"0xaa": tx})
+    gw = make_gateway(tmp_path, chain, FakePayer(10_000), base=base)
+    chain.push("authorize", ["agent1", 0, 10_000, "", 7], "agent1", "gw")
+    gw.journal.insert(7, "agent1", "http://vendor/item", req(10_000).model_dump(mode="json", by_alias=True),
+                      10_000, 0, "authorizing")
+    _stale(gw, 7, req_id=0, phase="payment_unknown", base_block=100, attempts=json.dumps(["0xaa"]))
+    await gw.reconcile()
+    assert gw.journal.get(7)["phase"] == "settled" and chain.reqs[0]["ext_txid"] == tx
+    assert ("nonce", "0xaa", 100) in base.searched and not any(s[0] == "transfer" for s in base.searched)
+
+
+async def test_reconciler_does_not_search_the_chain_when_no_payment_was_started(tmp_path):
+    chain = FakeChain()
+    base = FakeBase()
+    gw = make_gateway(tmp_path, chain, FakePayer(10_000), base=base)
+    chain.push("authorize", ["agent1", 0, 10_000, "", 8], "agent1", "gw")
+    gw.journal.insert(8, "agent1", "http://vendor/item", req(10_000).model_dump(mode="json", by_alias=True),
+                      10_000, 0, "authorizing")
+    _stale(gw, 8, req_id=0, phase="authorized")      # claimed, but the process stopped before paying
+    await gw.reconcile()
+    assert base.searched == [] and gw.journal.get(8)["phase"] == "failed" and chain.committed == 0
+
+
+async def test_permanent_settle_error_stops_retries(tmp_path):
+    chain = FakeChain()
+    gw = make_gateway(tmp_path, chain, FakePayer(10_000))
+    gw.journal.insert(9, "agent1", "http://vendor/item", req(10_000).model_dump(mode="json", by_alias=True),
+                      10_000, 0, "authorizing")
+    gw.journal.update(9, req_id=0, phase="paid_not_recorded", ext_tx="0x" + "ef" * 32)
+
+    async def refuse(action, data):
+        return {"ok": False, "error": "assertion failure with message: transaction already recorded"}
+    gw._push_confirmed = refuse
+    await gw.reconcile()
+    assert gw.journal.get(9)["phase"] == "needs_attention"

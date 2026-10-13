@@ -27,6 +27,22 @@
 7. Refused by the facilitator: retry up to 3 attempts, each only after checking that the previous
    signed authorization was not executed (`AuthorizationUsed` event). Every attempt is journaled.
 
+## Recovery (watcher)
+
+The gateway keeps a local journal (SQLite) of every request and the phase it reached. The watcher,
+one per agent, works through it every few seconds:
+
+- **Approved requests**: the watcher first claims the request in the journal
+  (`pending_approval` → `authorized`, one atomic update). Only the process whose claim succeeded pays.
+- **Interrupted payments** (`authorized`, `paying`, `payment_unknown`) are left alone until the x402
+  payment window has passed, so a signed payment that may still settle is never declared failed early.
+  After that, the watcher looks for the payment on the public chain by the authorization nonce of each
+  attempt. A verified transfer is recorded with `settle`. If no transfer is found, `fail` releases the
+  budget. If no payment was started, the public chain is not searched.
+- **Paid but not recorded**: `settle` is retried. If the contract refuses it permanently (e.g. the
+  request expired meanwhile), the request is marked `needs_attention` for a person to resolve.
+- **Unapproved requests** past the approval window are closed with `expire`.
+
 ## Audit
 
 - **Check A:** every SETTLED record → its public transaction succeeded and transferred exactly the

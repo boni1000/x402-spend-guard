@@ -71,7 +71,8 @@ class Spring:
         if self.wallet and self.wallet_pw_file:
             with open(self.wallet_pw_file) as f:
                 pw = f.read().strip()
-            subprocess.run(["cleos", "wallet", "unlock", "-n", self.wallet, "--password", pw],
+            # Password via stdin, not as an argument: arguments are visible in the process list.
+            subprocess.run(["cleos", "wallet", "unlock", "-n", self.wallet], input=pw + "\n",
                            capture_output=True, text=True, timeout=30)
 
     def push(self, action, data, actor, permission):
@@ -98,7 +99,7 @@ class Spring:
             exc = doc.get("processed", {}).get("except") or {}
             for s in exc.get("stack", []):
                 data = s.get("data", {})
-                text = re.sub(r"\$\{(\w+)\}", lambda m: str(data.get(m.group(1), m.group(0))), s.get("format", ""))
+                text = re.sub(r"\$\{(\w+)\}", lambda m, d=data: str(d.get(m.group(1), m.group(0))), s.get("format", ""))
                 m = re.search(r"assertion failure with message: (.*)", text)
                 if m:
                     return m.group(1)

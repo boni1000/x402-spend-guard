@@ -4,20 +4,37 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "x402-spend-guard"
-version = "0.1.0"
+version = "0.1.1"
 description = "Spending limits, human approval and two-way audit for AI agents that pay with x402, enforced by an Antelope smart contract"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
+authors = [{ name = "boni1000" }]
+keywords = ["x402", "ai-agents", "mcp", "antelope", "spring", "smart-contract", "payments", "governance", "audit"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Office/Business :: Financial",
+  "Topic :: Security",
+]
 dependencies = [
   "x402[evm,httpx,mcp]==2.25.0",
+  "mcp>=2,<3",              # MCPServer API (mcp.server.mcpserver)
   "web3>=7",
   "httpx>=0.28",
 ]
 
 [project.optional-dependencies]
 examples = ["fastapi>=0.115", "uvicorn>=0.30"]
-test = ["pytest>=8", "pytest-asyncio>=0.23"]
+test = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+
+[project.urls]
+Repository = "https://github.com/boni1000/x402-spend-guard"
+Issues = "https://github.com/boni1000/x402-spend-guard/issues"
+Changelog = "https://github.com/boni1000/x402-spend-guard/blob/main/CHANGELOG.md"
 
 [project.scripts]
 spend-guard-mcp = "spend_guard.mcp_server:main"
@@ -26,6 +43,12 @@ spend-guard-audit = "spend_guard.auditor:main"
 
 [tool.setuptools]
 packages = ["spend_guard"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

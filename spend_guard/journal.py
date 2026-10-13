@@ -27,13 +27,15 @@ create table if not exists requests (
 )"""
 
 # refused | authorizing | pending_approval | authorized | paying | payment_unknown |
-# paid_not_recorded | settled | failed | rejected | expired
+# paid_not_recorded | settled | failed | rejected | expired |
+# needs_attention (paid, but the chain refuses the settlement: a person must look at it)
 PHASES_OPEN = ("authorizing", "pending_approval", "authorized", "paying", "payment_unknown", "paid_not_recorded")
 
 
 class Journal:
     def __init__(self, path):
-        self.db = sqlite3.connect(path, check_same_thread=False)
+        # timeout: wait for another process (MCP server, watcher) holding the database lock
+        self.db = sqlite3.connect(path, check_same_thread=False, timeout=30)
         self.db.row_factory = sqlite3.Row
         self.lock = threading.Lock()
         with self.lock:
@@ -46,8 +48,8 @@ class Journal:
     def insert(self, nonce, agent, url, accepted, amount, vendor_id, phase):
         now = time.time()
         with self.lock:
-            self.db.execute("insert into requests (nonce, agent, url, accepted, amount, vendor_id, phase, created, updated)"
-                            " values (?,?,?,?,?,?,?,?,?)",
+            self.db.execute("insert into requests (nonce, agent, url, accepted, amount, vendor_id, phase, created, "
+                            "updated) values (?,?,?,?,?,?,?,?,?)",
                             (nonce, agent, url, json.dumps(accepted), amount, vendor_id, phase, now, now))
             self.db.commit()
 
@@ -57,6 +59,15 @@ class Journal:
         with self.lock:
             self.db.execute(f"update requests set {cols} where nonce = ?", (*fields.values(), nonce))
             self.db.commit()
+
+    def claim(self, nonce, from_phase, to_phase):
+        """Atomically move a request from one phase to another. Returns True only for the one process
+        that made the change, so two processes sharing this journal never act on the same request."""
+        with self.lock:
+            cur = self.db.execute("update requests set phase = ?, updated = ? where nonce = ? and phase = ?",
+                                  (to_phase, time.time(), nonce, from_phase))
+            self.db.commit()
+            return cur.rowcount == 1
 
     def get(self, nonce):
         with self.lock:

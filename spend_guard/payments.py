@@ -17,6 +17,11 @@ TRANSFER_TOPIC = Web3.keccak(text="Transfer(address,address,uint256)")
 AUTH_USED_TOPIC = Web3.keccak(text="AuthorizationUsed(address,bytes32)")   # EIP-3009, emitted by USDC
 
 
+def _pad(address):
+    """32-byte topic encoding of an address, for log filters."""
+    return "0x" + "0" * 24 + address.lower()[2:]
+
+
 class PaymentNotSent(Exception):
     """The payment could not be created or signed, so nothing was sent to the vendor."""
 
@@ -103,8 +108,7 @@ class BaseVerifier:
     def transfers(self, payer, from_block, to_block=None, pay_to=None, chunk=50):
         """USDC transfers out of `payer` (optionally to `pay_to`) as {tx_hash: (to, amount, block)}.
         Queried in small block ranges: the public RPC refuses large log queries (HTTP 413)."""
-        pad = lambda a: "0x" + "0" * 24 + a.lower()[2:]
-        topics = [TRANSFER_TOPIC, pad(payer)] + ([pad(pay_to)] if pay_to else [])
+        topics = [TRANSFER_TOPIC, _pad(payer)] + ([_pad(pay_to)] if pay_to else [])
         to_block = to_block or self.block_number()
         out = {}
         for start in range(int(from_block), int(to_block) + 1, chunk):
@@ -117,12 +121,11 @@ class BaseVerifier:
     def authorization_used(self, authorizer, nonce, from_block, chunk=50):
         """Tx hash in which this EIP-3009 authorization was executed, or None. Exact: identifies one
         specific signed payment, unlike matching on amount and recipient."""
-        pad = lambda a: "0x" + "0" * 24 + a.lower()[2:]
         latest = self.block_number()
         for start in range(int(from_block), latest + 1, chunk):
             for lg in self.w3.eth.get_logs({"address": self.usdc, "fromBlock": start,
                                             "toBlock": min(start + chunk - 1, latest),
-                                            "topics": [AUTH_USED_TOPIC, pad(authorizer), nonce]}):
+                                            "topics": [AUTH_USED_TOPIC, _pad(authorizer), nonce]}):
                 return "0x" + lg["transactionHash"].hex().removeprefix("0x").lower()
         return None
 

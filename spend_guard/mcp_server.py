@@ -6,6 +6,7 @@ because stdout carries the MCP protocol.
 """
 import asyncio
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
 
@@ -37,11 +38,16 @@ async def background():
 
 @asynccontextmanager
 async def lifespan(_server):
-    task = asyncio.create_task(background())
+    # Approvals, expiry and reconciliation belong to the watcher (spend-guard-watcher). Enable them
+    # here only if no watcher runs for this agent: SPEND_GUARD_BACKGROUND=1.
+    task = None
+    if os.environ.get("SPEND_GUARD_BACKGROUND", "").lower() in ("1", "true", "yes"):
+        task = asyncio.create_task(background())
     try:
         yield {}
     finally:
-        task.cancel()
+        if task:
+            task.cancel()
 
 
 mcp = MCPServer(

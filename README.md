@@ -111,6 +111,10 @@ auditor (no keys) ── read records + transfers, publish logaudit ─► both 
    spend-guard-watcher
    spend-guard-audit --anchor --incremental     # with audit.env, see audit.env.example
    ```
+   Run **one watcher per agent**. The MCP server only pays within the agent's own call; completing
+   approved payments, expiring requests and reconciling are the watcher's job. If you run no watcher,
+   set `SPEND_GUARD_BACKGROUND=1` for the MCP server instead. Processes that share a journal claim a
+   request atomically before paying it, so a second runner by mistake cannot pay twice.
 
 ## Contract actions
 

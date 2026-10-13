@@ -25,4 +25,6 @@ See [docs/threat-model.md](docs/threat-model.md) for the full analysis.
 
 - Never commit `keys.env`, wallet files or password files (they are in `.gitignore`).
 - The gateway signs through `keosd`; Antelope private keys never enter the Python process.
+- The `keosd` wallet password is passed to `cleos` on standard input, never as an argument. Keep the
+  password file readable only by the gateway's user (`chmod 600`).
 - Generate keys on the machine that uses them; do not copy them between machines.
