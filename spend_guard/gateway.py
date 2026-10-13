@@ -334,6 +334,11 @@ class Gateway:
             res = await self._push_confirmed("settle", [self.cfg.agent, j["req_id"], acc["network"], j["ext_tx"]])
             if res["ok"]:
                 self.journal.update(j["nonce"], phase="settled", error=None)
+                continue
+            row = await asyncio.to_thread(self.spring.req_by_id, j["req_id"])
+            if row and row["status"] == 5 and row["ext_txid"].lower() == j["ext_tx"].lower():
+                # Already recorded (e.g. by another process): nothing is wrong.
+                self.journal.update(j["nonce"], phase="settled", error=None)
             elif any(m in res["error"] for m in SETTLE_PERMANENT):
                 # The chain will never accept this settlement: stop retrying and flag it for a person.
                 self.journal.update(j["nonce"], phase="needs_attention", error=res["error"])

@@ -274,3 +274,20 @@ async def test_permanent_settle_error_stops_retries(tmp_path):
     gw._push_confirmed = refuse
     await gw.reconcile()
     assert gw.journal.get(9)["phase"] == "needs_attention"
+
+
+async def test_settlement_recorded_by_another_process_is_not_flagged(tmp_path):
+    chain = FakeChain()
+    tx = "0x" + "ef" * 32
+    gw = make_gateway(tmp_path, chain, FakePayer(10_000))
+    chain.push("authorize", ["agent1", 0, 10_000, "", 10], "agent1", "gw")
+    chain.push("settle", ["agent1", 0, NET, tx], "agent1", "gw")    # the other process was faster
+    gw.journal.insert(10, "agent1", "http://vendor/item", req(10_000).model_dump(mode="json", by_alias=True),
+                      10_000, 0, "authorizing")
+    gw.journal.update(10, req_id=0, phase="paid_not_recorded", ext_tx=tx)
+
+    async def refuse(action, data):
+        return {"ok": False, "error": "assertion failure with message: request is not authorized for payment"}
+    gw._push_confirmed = refuse
+    await gw.reconcile()
+    assert gw.journal.get(10)["phase"] == "settled"

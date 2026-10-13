@@ -14,7 +14,7 @@
     Matching by amount and payee is now only a fallback for older journals.
   - It no longer scans the public chain from block 0 when no payment was started.
   - It stops retrying a settlement that the contract refuses permanently. The request is marked
-    `needs_attention` instead.
+    `needs_attention` instead, unless the chain shows it was already recorded with the same transaction.
 - Explorer links follow the configured network instead of an environment variable read at import.
 - Request nonces include a random part, so two processes acting for one agent cannot collide.
 
