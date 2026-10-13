@@ -291,3 +291,14 @@ async def test_settlement_recorded_by_another_process_is_not_flagged(tmp_path):
     gw._push_confirmed = refuse
     await gw.reconcile()
     assert gw.journal.get(10)["phase"] == "settled"
+
+
+async def test_fresh_watcher_pays_an_approved_request(tmp_path):
+    chain = FakeChain()
+    payer = FakePayer(1_500_000)
+    res = await make_gateway(tmp_path, chain, payer).paid_fetch("http://vendor/report", 2)
+    chain.reqs[0]["status"] = 3                      # approved
+    watcher = make_gateway(tmp_path, chain, payer)   # new process: has never run paid_fetch
+    await watcher.process_approved()
+    assert payer.paid == ["ok"] and chain.reqs[0]["status"] == 5
+    assert watcher.journal.by_req_id(res["request_id"])["phase"] == "settled"

@@ -3,6 +3,10 @@
 ## 0.1.1 — 2026-10-13
 
 ### Fixed
+- **Watcher crash after paying an approved request.** A watcher that had not served a direct
+  purchase since it started failed right after the payment (timing data was not set up). The
+  payment went through, but its settlement was left to the reconciler and the vendor's content was
+  lost. Found in a live test; a regression test covers it.
 - **Double payment of an approved request.** If two processes handled the same journal (e.g. the
   watcher and an MCP server), both could pay an approved request. A request is now claimed atomically
   in the journal before it is paid, and the MCP server no longer runs approvals and reconciliation by

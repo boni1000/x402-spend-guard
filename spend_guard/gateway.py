@@ -324,6 +324,7 @@ class Gateway:
                 await self._push_confirmed("fail", [self.cfg.agent, row["id"], "vendor price or terms changed"])
                 self.journal.update(j["nonce"], phase="failed", error="vendor price or terms changed")
                 continue
+            self._t = {"authorized": time.time()}   # timing of this payment (paid_fetch is not involved)
             result = await self._pay(j["nonce"], row, j["url"], pr, acc)
             log.info("approved request %s: %s", row["id"], result["status"])
 
