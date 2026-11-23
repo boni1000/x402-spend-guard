@@ -16,6 +16,7 @@
   a demo rehearsal on Jungle4; three regression tests cover it.
 
 ### Added
+- **Demo video** (`docs/demo.mp4`, linked from the README): three minutes on the Jungle4 deployment.
 - **Live demo on the public Jungle4 testnet** (contract `spendguard11`), with notes on deploying
   there: accounts and CPU through PowerUp, and the RAM the contract needs.
 
@@ -42,6 +43,7 @@
 - Request nonces include a random part, so two processes acting for one agent cannot collide.
 
 ### Added
+- **Demo video** (`docs/demo.mp4`, linked from the README): three minutes on the Jungle4 deployment.
 - Tests for the atomic claim, concurrent watchers, and the reconciler. CI (ruff + pytest).
 - Package metadata: project URLs, keywords and classifiers. `mcp` is pinned to 2.x.
 

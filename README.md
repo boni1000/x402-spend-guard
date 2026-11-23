@@ -21,6 +21,9 @@ The agent never holds a key. The gateway's key on the Antelope chain is restrict
 > testnet and local open-weight LLM agents. See [docs/results.md](docs/results.md) and the
 > [live demo](#live-demo-on-jungle4). Do not use with real funds.
 
+**[Watch the 3-minute demo](docs/demo.mp4)** (MP4, 2 MB, captions, no sound): a normal purchase, a fooled
+agent refused by the contract, the kill switch and the two-way audit, recorded live on Jungle4.
+
 ## How it works
 
 ```
