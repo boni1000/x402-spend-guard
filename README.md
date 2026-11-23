@@ -17,8 +17,9 @@ The agent never holds a key. The gateway's key on the Antelope chain is restrict
 (`linkauth`) to four contract actions; it cannot move tokens, approve payments or change rules.
 
 > **Status: research prototype, testnet only.** Tested end to end on a five-producer private Antelope
-> network (Spring 1.2.2) with payments on the Base Sepolia testnet and local open-weight LLM agents.
-> See [docs/results.md](docs/results.md). Do not use with real funds.
+> network (Spring 1.2.2) and on the public **Jungle4** testnet, with payments on the Base Sepolia
+> testnet and local open-weight LLM agents. See [docs/results.md](docs/results.md) and the
+> [live demo](#live-demo-on-jungle4). Do not use with real funds.
 
 ## How it works
 
@@ -67,6 +68,60 @@ auditor (no keys) ── read records + transfers, publish logaudit ─► both 
 - Python ≥ 3.10; Antelope CDT 4.1 to build the contract.
 - For multi-signature control of the contract: a **current** `eosio.msig` (older versions execute
   approved proposals as deferred transactions, which Spring nodes no longer run).
+
+## Live demo on Jungle4
+
+A public deployment on the Jungle4 testnet that anyone can read, no keys needed. It runs the same
+contract binary as the private-network tests (code hash `28c1ed27…52837`).
+
+| Account | Role |
+|---|---|
+| `spendguard11` | the contract |
+| `sgadmin11111` | admin and approver |
+| `sgagent11111` | agent; its `gw` key can call only `authorize`, `settle`, `fail` and `expire` |
+| `sgauditor111` | auditor |
+
+Policy of `sgagent11111`: 1 USDC per payment, 3 USDC per day, human approval above 0.5 USDC. Payments
+go on Base Sepolia from the payer `0x3Bc1a524e1A5De23A2A992340efD21D837372E10` to one whitelisted
+vendor.
+
+Read it with plain API calls:
+```bash
+J=https://jungle4.cryptolions.io
+curl -s -X POST $J/v1/chain/get_code_hash -d '{"account_name":"spendguard11"}'
+curl -s -X POST $J/v1/chain/get_table_rows -d '{"code":"spendguard11","scope":"spendguard11","table":"policies","json":true}'
+curl -s -X POST $J/v1/chain/get_table_rows -d '{"code":"spendguard11","scope":"spendguard11","table":"payreqs","json":true,"reverse":true,"limit":10}'
+curl -s -X POST $J/v1/chain/get_account -d '{"account_name":"sgagent11111"}'   # gw permission and its links
+```
+
+Or audit it yourself (the auditor needs no keys), with this `audit.env`:
+```bash
+CHAIN_URL=https://jungle4.cryptolions.io
+CONTRACT=spendguard11
+PAYER_ADDRESS=0x3Bc1a524e1A5De23A2A992340efD21D837372E10
+RPC=https://sepolia.base.org
+USDC=0x036CbD53842c5426634e7929541eC2318f3dCF7e
+```
+```bash
+SPEND_GUARD_ENV=audit.env spend-guard-audit
+```
+
+### Deploying your own on Jungle4
+
+Follow the [quick start](#quick-start) with `CHAIN_URL=https://jungle4.cryptolions.io`. Three things
+differ from a private chain:
+
+- **Accounts and test EOS** come from https://monitor4.jungletestnet.io (*Create Account*, *Faucet*;
+  100 EOS per claim).
+- **CPU comes from PowerUp, not staking.** A new account can do nothing until it is powered up: use
+  *PowerUp* on the monitor site, or `eosio::powerup` paid by an account that already has CPU (e.g.
+  `cleos push action eosio powerup '["payer","receiver",1,10000000000,1000000000000,"5.0000 EOS"]' -p payer@active`).
+- **RAM for the contract** is about 650 KB, roughly 140 EOS at November 2026 prices, so plan two
+  faucet claims.
+
+Jungle4 runs Savanna consensus, so a block is final about 1 s after it is produced (compared with
+about 36 s on our private pre-Savanna network). Payments above the approval threshold are paid only
+after the approval is final, so approvals take effect much sooner here.
 
 ## Quick start
 

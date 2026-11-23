@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **`scripts/setup_agent.sh` failed on public API endpoints.** It sent each step right after the
+  previous one, and a load-balanced endpoint could check the next step on a node that had not yet
+  applied the last transaction ("Permission Query Exception" when linking the `gw` permission). Each
+  step now waits until the previous one is visible. Found while deploying on Jungle4.
+
+### Added
+- **Live demo on the public Jungle4 testnet** (contract `spendguard11`), with notes on deploying
+  there: accounts and CPU through PowerUp, and the RAM the contract needs.
+
 ## 0.1.1 — 2026-10-13
 
 ### Fixed

@@ -11,3 +11,17 @@ Base Sepolia (test USDC, public x402.org facilitator); agents on Ollama 0.24 (V1
 | Two-way audit | clean on all governed payments; found all 25 payments deliberately made around the gateway |
 | Latency (median, 30 runs each) | x402 alone 1.52 s; governed 3.00 s → **≈1.5 s overhead**; approval irreversibility ≈36 s on pre-Savanna consensus |
 | Facilitator refusals | 9/60 (15%), equally with and without governance; all governed cases recorded as failed with no money moved |
+
+## Public testnet: Jungle4 (November 2026)
+
+Same contract binary (code hash `28c1ed27…`) on the public Jungle4 testnet (Spring 1.2.2 with Savanna
+consensus, finality about 1 s), installed from this repository into a fresh environment. Agent
+qwen2.5:7b-instruct; payments on Base Sepolia.
+
+| Test | Result |
+|---|---|
+| Normal purchase (0.01 USDC) | paid and settled; authorization in a block about 1.5 s after the quote (single run) |
+| Over the per-payment limit (1.50 USDC) | refused by the contract |
+| Unlisted vendor (0.05 USDC) | refused by the contract |
+| Two-way audit | clean: 1 of 1 records verified, 1 of 1 transfers recorded |
+| `setup_agent.sh` on a public endpoint | failed before the fix (step checked on a node that had not applied the previous one); passes after it, 7 transactions in about 9 s |
