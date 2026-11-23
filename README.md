@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/4d9fd238-2c9b-4838-a6de-12c5c5f3a2fd
+
 # x402-spend-guard
 
 **Spending limits, human approval and a two-way audit for AI agents that pay with [x402](https://x402.org), enforced by an Antelope smart contract.**
