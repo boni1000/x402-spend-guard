@@ -43,7 +43,6 @@
 - Request nonces include a random part, so two processes acting for one agent cannot collide.
 
 ### Added
-- **Demo video** (`docs/demo.mp4`, linked from the README): three minutes on the Jungle4 deployment.
 - Tests for the atomic claim, concurrent watchers, and the reconciler. CI (ruff + pytest).
 - Package metadata: project URLs, keywords and classifiers. `mcp` is pinned to 2.x.
 
