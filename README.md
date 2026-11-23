@@ -1,6 +1,6 @@
 
 
-https://github.com/user-attachments/assets/4d9fd238-2c9b-4838-a6de-12c5c5f3a2fd
+
 
 # x402-spend-guard
 
@@ -27,6 +27,7 @@ The agent never holds a key. The gateway's key on the Antelope chain is restrict
 
 **[Watch the 3-minute demo](docs/demo.mp4)** (MP4, 2 MB, captions, no sound): a normal purchase, a fooled
 agent refused by the contract, the kill switch and the two-way audit, recorded live on Jungle4.
+https://github.com/user-attachments/assets/4d9fd238-2c9b-4838-a6de-12c5c5f3a2fd
 
 ## How it works
 
