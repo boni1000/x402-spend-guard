@@ -7,6 +7,13 @@
   previous one, and a load-balanced endpoint could check the next step on a node that had not yet
   applied the last transaction ("Permission Query Exception" when linking the `gw` permission). Each
   step now waits until the previous one is visible. Found while deploying on Jungle4.
+- **A paid purchase could be reported to the agent as an error.** After paying, the gateway waits
+  to see its `settle` transaction in a block. One failed read during that wait (a timeout, a rate
+  limit, or a node that did not have the block yet) raised an exception: the agent got "Error
+  executing tool" although it had paid, and the journal stayed at `paying`. Failed reads are now
+  retried until the deadline, and a settlement counts as recorded only once it is seen in a block;
+  otherwise the request is left as `paid_not_recorded` and the reconciler finishes it. Found during
+  a demo rehearsal on Jungle4; three regression tests cover it.
 
 ### Added
 - **Live demo on the public Jungle4 testnet** (contract `spendguard11`), with notes on deploying

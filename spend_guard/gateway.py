@@ -105,7 +105,19 @@ class Gateway:
     async def _push_confirmed(self, action, data):
         res = await asyncio.to_thread(self._push, action, data)
         if res["ok"]:
-            res["block"] = await asyncio.to_thread(self.spring.wait_included, res["trx_id"], res["block_num"])
+            try:
+                res["block"] = await asyncio.to_thread(self.spring.wait_included, res["trx_id"], res["block_num"])
+            except Exception as e:  # noqa: BLE001 - inclusion unknown; callers treat it as not seen
+                log.warning("could not confirm %s in a block: %s", action, e)
+                res["block"] = None
+        return res
+
+    async def _settle(self, req_id, network, tx):
+        """agentgov::settle, counted as recorded only once it is seen in a block. Otherwise the
+        reconciler pushes it again, and finds a settlement that did reach the chain as already recorded."""
+        res = await self._push_confirmed("settle", [self.cfg.agent, req_id, network, tx])
+        if res["ok"] and res.get("block") is None:
+            return {"ok": False, "error": "settlement not seen in a block yet"}
         return res
 
     def _vendor(self, network, pay_to):
@@ -217,7 +229,7 @@ class Gateway:
         if found_tx:   # paid after all, but the vendor did not deliver the content in that response
             ok, _ = await asyncio.to_thread(self.base.verify, found_tx, self.payer.address, acc.pay_to, amount)
             if ok:
-                res = await self._push_confirmed("settle", [self.cfg.agent, req_id, acc.network, found_tx])
+                res = await self._settle(req_id, acc.network, found_tx)
                 self.journal.update(nonce, ext_tx=found_tx, phase="settled" if res["ok"] else "paid_not_recorded")
                 return {"status": "paid", "request_id": req_id, "price": usdc(amount), "tx": found_tx,
                         "explorer": self._explorer(found_tx), "content": "",
@@ -232,7 +244,7 @@ class Gateway:
                         "reason": "vendor reported a payment that could not be verified"}
             self._t["verified"] = time.time()
             self.journal.update(nonce, ext_tx=tx, content=r.text[:20000])
-            res = await self._push_confirmed("settle", [self.cfg.agent, req_id, acc.network, tx])
+            res = await self._settle(req_id, acc.network, tx)
             self._t["settled"] = time.time()
             self.journal.update(nonce, phase="settled" if res["ok"] else "paid_not_recorded",
                                 error=None if res["ok"] else res["error"])
@@ -332,7 +344,7 @@ class Gateway:
         """Resolve interrupted payments (test T11) and expire stale requests."""
         for j in self.journal.by_phase("paid_not_recorded"):
             acc = json.loads(j["accepted"])
-            res = await self._push_confirmed("settle", [self.cfg.agent, j["req_id"], acc["network"], j["ext_tx"]])
+            res = await self._settle(j["req_id"], acc["network"], j["ext_tx"])
             if res["ok"]:
                 self.journal.update(j["nonce"], phase="settled", error=None)
                 continue
@@ -367,7 +379,7 @@ class Gateway:
                 ok, _ = await asyncio.to_thread(self.base.verify, tx, self.payer.address, acc["payTo"],
                                                 j["amount"])
                 if ok:
-                    res = await self._push_confirmed("settle", [self.cfg.agent, j["req_id"], acc["network"], tx])
+                    res = await self._settle(j["req_id"], acc["network"], tx)
                     self.journal.update(j["nonce"], ext_tx=tx,
                                         phase="settled" if res["ok"] else "paid_not_recorded")
                     continue

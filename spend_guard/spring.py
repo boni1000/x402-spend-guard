@@ -112,18 +112,24 @@ class Spring:
 
     # ------------------------------------------------------------------ inclusion
     def wait_included(self, trx_id, start_block, timeout=None):
-        """Return the block number containing trx_id, or None if it was not included in time."""
+        """Return the block number containing trx_id, or None if it was not included in time.
+
+        A failed read (timeout, rate limit, or a node behind a load balancer that does not have the
+        block yet) is retried until the deadline: the transaction may already be on chain."""
         deadline = time.time() + (timeout or self.expiration + 5)
         n = max(1, int(start_block) - 2)
         while time.time() < deadline:
-            head = self.info()["head_block_num"]
-            while n <= head:
-                block = self._post("/v1/chain/get_block", {"block_num_or_id": n})
-                for t in block.get("transactions", []):
-                    trx = t.get("trx")
-                    if (trx.get("id") if isinstance(trx, dict) else trx) == trx_id:
-                        return n
-                n += 1
+            try:
+                head = self.info()["head_block_num"]
+                while n <= head:
+                    block = self._post("/v1/chain/get_block", {"block_num_or_id": n})
+                    for t in block.get("transactions", []):
+                        trx = t.get("trx")
+                        if (trx.get("id") if isinstance(trx, dict) else trx) == trx_id:
+                            return n
+                    n += 1
+            except (httpx.HTTPError, ValueError):
+                pass
             time.sleep(0.3)
         return None
 

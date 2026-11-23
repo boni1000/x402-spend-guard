@@ -302,3 +302,37 @@ async def test_fresh_watcher_pays_an_approved_request(tmp_path):
     await watcher.process_approved()
     assert payer.paid == ["ok"] and chain.reqs[0]["status"] == 5
     assert watcher.journal.by_req_id(res["request_id"])["phase"] == "settled"
+
+
+class SettleNotSeenChain(FakeChain):
+    """The settle push is accepted, but confirming it in a block fails (as on a public endpoint)."""
+
+    def __init__(self, error=None):
+        super().__init__()
+        self.error = error
+
+    def wait_included(self, trx_id, start_block, timeout=None):
+        if self.pushes[-1][0] != "settle":
+            return 1
+        if self.error:
+            raise self.error
+        return None
+
+
+async def test_settlement_not_seen_in_a_block_is_left_to_the_reconciler(tmp_path):
+    chain = SettleNotSeenChain()
+    gw = make_gateway(tmp_path, chain, FakePayer(10_000))
+    res = await gw.paid_fetch("http://vendor/item", 0.05)
+    assert res["status"] == "paid" and res["content"] == "paid content" and "warning" in res
+    assert gw.journal.by_req_id(res["request_id"])["phase"] == "paid_not_recorded"
+    chain.wait_included = FakeChain.wait_included.__get__(chain)    # the endpoint recovers
+    await gw.reconcile()
+    assert gw.journal.by_req_id(res["request_id"])["phase"] == "settled"
+
+
+async def test_error_while_confirming_the_settlement_does_not_fail_a_paid_request(tmp_path):
+    chain = SettleNotSeenChain(error=RuntimeError("HTTP 429 Too Many Requests"))
+    gw = make_gateway(tmp_path, chain, FakePayer(10_000))
+    res = await gw.paid_fetch("http://vendor/item", 0.05)
+    assert res["status"] == "paid" and res["content"] == "paid content" and "warning" in res
+    assert gw.journal.by_req_id(res["request_id"])["phase"] == "paid_not_recorded"
