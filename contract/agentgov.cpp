@@ -4,16 +4,24 @@
 // payment, and fail() if the payment did not happen. Admin registers agents, policies and
 // vendors; the policy's approver decides on payments above the approval threshold.
 // Amounts are integers in micro-USDC (6 decimals), the same units x402 uses.
+//
+// MPC signing (optional): instead of paying from a wallet on the gateway, the gateway calls
+// requestsig(), and the contract builds the EIP-3009 authorization itself and has it signed for
+// the agent's MPC-derived address. The gateway then holds no payer key at all.
 #include <eosio/crypto.hpp>
+#include <eosio/crypto_ext.hpp>
 #include <eosio/eosio.hpp>
 #include <eosio/singleton.hpp>
 #include <eosio/system.hpp>
+
+#include "eip3009.hpp"
 
 using namespace eosio;
 
 namespace {
    enum req_status : uint8_t {
-      AUTHORIZED = 1, PENDING = 2, APPROVED = 3, REJECTED = 4, SETTLED = 5, FAILED = 6, EXPIRED = 7
+      AUTHORIZED = 1, PENDING = 2, APPROVED = 3, REJECTED = 4, SETTLED = 5, FAILED = 6, EXPIRED = 7,
+      SIGNED = 8   // an MPC signature was requested: it is a payment from then on
    };
    enum agent_status : uint8_t { REVOKED = 0, ACTIVE = 1 };
 
@@ -29,11 +37,38 @@ namespace {
       return (uint128_t(agent.value) << 64) | nonce;
    }
    time_point_sec now() { return time_point_sec(current_time_point()); }
+
+   eip3009::bytes32 chain_keccak(const uint8_t* p, size_t n) {
+      return eosio::keccak(reinterpret_cast<const char*>(p), n).extract_as_byte_array();
+   }
+   eip3009::address evm_address(const std::string& s) {
+      eip3009::address a{};
+      check(eip3009::parse_address(s, a), "invalid EVM address");
+      return a;
+   }
+   // CAIP-2 "eip155:<chain id>", the form x402 uses for EVM networks.
+   uint64_t evm_chain_id(const std::string& network) {
+      check(network.size() > 7 && network.rfind("eip155:", 0) == 0, "not an EVM network (eip155:<chain id>)");
+      uint64_t id = 0;
+      for (size_t i = 7; i < network.size(); ++i) {
+         const char c = network[i];
+         check(c >= '0' && c <= '9' && id <= (UINT64_MAX - 9) / 10, "invalid chain id");
+         id = id * 10 + (c - '0');
+      }
+      return id;
+   }
 }
 
 struct auth_result {
    uint64_t id;
    uint8_t  status;
+};
+
+struct sig_request {
+   uint64_t    id;
+   checksum256 digest;
+   checksum256 nonce;
+   uint64_t    valid_before;
 };
 
 struct budget_info {
@@ -238,7 +273,8 @@ public:
       payreqs_t reqs(get_self(), get_self().value);
       const auto& r = reqs.get(id, "unknown request");
       check(r.agent == agent, "not your request");
-      check(r.status == AUTHORIZED || r.status == APPROVED, "request is not authorized for payment");
+      check(r.status == AUTHORIZED || r.status == APPROVED || r.status == SIGNED,
+            "request is not authorized for payment");
       check(!ext_txid.empty() && ext_txid.size() <= 100, "invalid transaction id");
       vendors_t vendors(get_self(), get_self().value);
       check(lower(ext_network) == vendors.get(r.vendor_id).network, "network does not match vendor");
@@ -272,6 +308,121 @@ public:
       check(now() >= r.expires, "not expired yet");
       release(r);
       reqs.modify(r, same_payer, [&](auto& x) { x.status = EXPIRED; x.updated = now(); });
+   }
+
+   // ---------------------------------------------------------------- MPC signing
+
+   // mpc: the MPC signing contract (empty: not connected yet, nothing gets signed).
+   // sig_ttl_sec: how long a signed authorization is valid (its validBefore).
+   // attester: the only account that may release the budget of a signature that was never used;
+   // empty: never released. It must not be an agent, or a gateway could spend past its limits.
+   [[eosio::action]]
+   void setmpc(name mpc, uint32_t sig_ttl_sec, name attester) {
+      const auto cfg = get_cfg();
+      require_auth(cfg.admin);
+      check(mpc == name() || is_account(mpc), "mpc account does not exist");
+      check(attester == name() || is_account(attester), "attester account does not exist");
+      agents_t agents(get_self(), get_self().value);
+      check(attester == name() || agents.find(attester.value) == agents.end(), "an agent cannot be the attester");
+      check(sig_ttl_sec >= 10 && sig_ttl_sec <= 3600, "sig_ttl_sec must be between 10 and 3600");
+      mpccfg_t(get_self(), get_self().value).set(mpc_config{mpc, sig_ttl_sec, attester}, cfg.admin);
+   }
+
+   // The token's EIP-712 domain on an EVM network, e.g. ("eip155:84532", <USDC>, "USDC", "2").
+   // The name differs per network (USDC on Base is "USD Coin"), so it is always configured.
+   [[eosio::action]]
+   void setevmnet(std::string network, std::string token, std::string token_name, std::string token_version) {
+      const auto cfg = get_cfg();
+      require_auth(cfg.admin);
+      network = lower(network);
+      const uint64_t chain_id = evm_chain_id(network);
+      evm_address(token);
+      check(!token_name.empty() && token_name.size() <= 64, "invalid token name");
+      check(!token_version.empty() && token_version.size() <= 16, "invalid token version");
+      evmnets_t nets(get_self(), get_self().value);
+      auto set = [&](auto& r) {
+         r.chain_id = chain_id; r.network = network; r.token = lower(token);
+         r.token_name = token_name; r.token_version = token_version;
+      };
+      auto it = nets.find(chain_id);
+      if (it == nets.end()) nets.emplace(cfg.admin, set);
+      else nets.modify(it, cfg.admin, set);
+   }
+
+   // The EVM address the MPC network derives for (this contract, agent). A wrong address cannot
+   // pay anything: the signature would not belong to it and USDC would refuse the authorization.
+   [[eosio::action]]
+   void setpayer(name agent, std::string address) {
+      const auto cfg = get_cfg();
+      require_auth(cfg.admin);
+      agents_t agents(get_self(), get_self().value);
+      check(agents.find(agent.value) != agents.end(), "agent not registered");
+      evm_address(address);
+      payers_t payers(get_self(), get_self().value);
+      auto set = [&](auto& r) { r.agent = agent; r.address = lower(address); };
+      auto it = payers.find(agent.value);
+      if (it == payers.end()) payers.emplace(cfg.admin, set);
+      else payers.modify(it, cfg.admin, set);
+   }
+
+   // Builds the EIP-3009 authorization of an authorized request (payer, whitelisted vendor, amount,
+   // validBefore, nonce: all from the contract's own tables) and asks for its signature. The
+   // signature is a payment that anyone can submit, so from here the request can only be settled,
+   // or released by the attester once validBefore has passed; fail and expire no longer apply.
+   [[eosio::action]]
+   sig_request requestsig(name agent, uint64_t id) {
+      require_auth(agent);
+      const auto mc = get_mpccfg();
+      payreqs_t reqs(get_self(), get_self().value);
+      const auto& r = reqs.get(id, "unknown request");
+      check(r.agent == agent, "not your request");
+      check(r.status == AUTHORIZED || r.status == APPROVED, "request is not authorized for payment");
+      check(now() < r.expires, "request has expired");
+      agents_t agents(get_self(), get_self().value);
+      check(agents.get(agent.value).status == ACTIVE, "agent is revoked");
+      vendors_t vendors(get_self(), get_self().value);
+      const auto& v = vendors.get(r.vendor_id);
+      check(v.active, "vendor is not whitelisted");
+      evmnets_t nets(get_self(), get_self().value);
+      const auto& net = nets.get(evm_chain_id(v.network), "network not configured for signing");
+      payers_t payers(get_self(), get_self().value);
+      const auto& p = payers.get(agent.value, "agent has no payer address");
+
+      const uint64_t valid_before = uint64_t(now().sec_since_epoch()) + mc.sig_ttl_sec;
+      const auto nonce = eip3009::request_nonce(get_self().value, id, chain_keccak);
+      const eip3009::domain d{net.token_name, net.token_version, net.chain_id, evm_address(net.token)};
+      // validAfter 0: valid at once, whatever the clock difference between the two chains.
+      const eip3009::authorization a{evm_address(p.address), evm_address(v.pay_to), r.amount, 0, valid_before, nonce};
+      const checksum256 digest(eip3009::digest(d, a, chain_keccak));
+
+      sigreqs_t sigs(get_self(), get_self().value);
+      sigs.emplace(agent, [&](auto& s) {
+         s.id = id; s.network = v.network; s.payer = p.address; s.pay_to = v.pay_to; s.value = r.amount;
+         s.valid_before = valid_before; s.nonce = checksum256(nonce); s.digest = digest; s.requested = now();
+      });
+      reqs.modify(r, same_payer, [&](auto& x) { x.status = SIGNED; x.updated = now(); });
+      // The MPC network signs once this transaction is irreversible, with the key of (this
+      // contract, agent). Interface as Alcor announced it; agentgov@active needs eosio.code.
+      if (mc.mpc != name())
+         action(permission_level{get_self(), "active"_n}, mc.mpc, "sign"_n,
+                std::make_tuple(get_self(), agent.to_string(), digest, uint8_t(0))).send();
+      return sig_request{id, digest, checksum256(nonce), valid_before};
+   }
+
+   // The attester reports that a signed authorization was never used: its validBefore has passed and
+   // USDC's authorizationState(payer, nonce) is false, so it can no longer pay. Releases its budget.
+   [[eosio::action]]
+   void sigunused(name attester, uint64_t id) {
+      require_auth(attester);
+      const auto mc = get_mpccfg();
+      check(mc.attester != name() && attester == mc.attester, "not the attester");
+      payreqs_t reqs(get_self(), get_self().value);
+      const auto& r = reqs.get(id, "unknown request");
+      check(r.status == SIGNED, "request is not signed");
+      sigreqs_t sigs(get_self(), get_self().value);
+      check(uint64_t(now().sec_since_epoch()) > sigs.get(id).valid_before, "authorization is still valid");
+      release(r);
+      reqs.modify(r, same_payer, [&](auto& x) { x.status = FAILED; x.updated = now(); });
    }
 
    // Audit attestation: any account may publish the result of an independent audit of the
@@ -388,6 +539,46 @@ private:
       indexed_by<"bystatus"_n, const_mem_fun<payreq_row, uint64_t, &payreq_row::by_status>>,
       indexed_by<"bytx"_n, const_mem_fun<payreq_row, checksum256, &payreq_row::by_tx>>>;
 
+   struct [[eosio::table("mpccfg")]] mpc_config {
+      name     mpc;
+      uint32_t sig_ttl_sec;
+      name     attester;
+   };
+   using mpccfg_t = singleton<"mpccfg"_n, mpc_config>;
+
+   // EVM networks agentgov can sign for, by chain id.
+   struct [[eosio::table]] evmnet_row {
+      uint64_t    chain_id;
+      std::string network;
+      std::string token;
+      std::string token_name;
+      std::string token_version;
+      uint64_t primary_key() const { return chain_id; }
+   };
+   using evmnets_t = multi_index<"evmnets"_n, evmnet_row>;
+
+   struct [[eosio::table]] payer_row {
+      name        agent;
+      std::string address;
+      uint64_t primary_key() const { return agent.value; }
+   };
+   using payers_t = multi_index<"payers"_n, payer_row>;
+
+   // The exact authorization signed for a request (same id as in payreqs; validAfter is 0).
+   struct [[eosio::table]] sigreq_row {
+      uint64_t       id;
+      std::string    network;
+      std::string    payer;
+      std::string    pay_to;
+      uint64_t       value;
+      uint64_t       valid_before;
+      checksum256    nonce;
+      checksum256    digest;
+      time_point_sec requested;
+      uint64_t primary_key() const { return id; }
+   };
+   using sigreqs_t = multi_index<"sigreqs"_n, sigreq_row>;
+
    struct [[eosio::table]] audit_row {
       uint64_t       id;
       name           auditor;
@@ -406,6 +597,11 @@ private:
    config get_cfg() {
       config_t c(get_self(), get_self().value);
       check(c.exists(), "contract not initialised");
+      return c.get();
+   }
+   mpc_config get_mpccfg() {
+      mpccfg_t c(get_self(), get_self().value);
+      check(c.exists(), "MPC signing not configured");
       return c.get();
    }
    static uint32_t today(const config& cfg) {

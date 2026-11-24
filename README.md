@@ -188,6 +188,9 @@ after the approval is final, so approvals take effect much sooner here.
 | `settle`, `fail` | agent's `gw` key | record the public payment / release the budget |
 | `expire` | anyone (gateway) | close requests whose validity has passed |
 | `getbudget` | read-only | limits and remaining budget |
+| `setmpc`, `setevmnet`, `setpayer` | admin | MPC mode: signing contract, signature validity and attester; token domain per EVM network; each agent's MPC payer address |
+| `requestsig` | agent's `gw` key | MPC mode: build the EIP-3009 authorization of an authorized request and have it signed |
+| `sigunused` | attester | MPC mode: release the budget of a signed authorization that expired unused |
 | `logaudit` | any account | publish an audit attestation signed with its own key |
 
 ## Security
@@ -196,6 +199,12 @@ Read [SECURITY.md](SECURITY.md) and [docs/threat-model.md](docs/threat-model.md)
 contract bounds what the gateway's chain key can authorize, but the gateway machine also holds the
 payer wallet — a compromised gateway can pay around the contract. The auditor's reverse check detects
 this afterwards; it does not prevent it. Keep only a small float in the payer wallet.
+
+**MPC mode** (`PAYER_MODE=mpc`, experimental) removes the payer key from the gateway: the contract
+builds each payment authorization and an MPC network signs it, so the limits become the only way a
+payment can be signed. It moves the trust to the MPC operators and to whoever controls the agentgov
+account; see SECURITY.md. It is tested against a mock of the announced interface of Alcor's MPC
+network, which is not available yet.
 
 ## Lessons learned
 

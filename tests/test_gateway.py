@@ -71,6 +71,7 @@ class FakeChain:
 
 class FakePayer:
     address = "0x00000000000000000000000000000000000000C3"
+    signs_on_chain = False
 
     def __init__(self, price, pay_to=VENDOR, outcomes=None):
         self.price, self.pay_to = price, pay_to
@@ -85,7 +86,7 @@ class FakePayer:
     def choose(self, pr):
         return pr.accepts[0]
 
-    async def pay(self, url, pr, acc):
+    async def pay(self, url, pr, acc, req_id=None):
         outcome = self.outcomes.pop(0) if self.outcomes else "ok"
         nonce = "0x" + f"{len(self.paid):064x}"
         self.paid.append(outcome)

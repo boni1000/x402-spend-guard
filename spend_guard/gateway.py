@@ -9,6 +9,10 @@ Flow of paid_fetch(url, max_price):
      AUTHORIZED -> pay exactly the authorized requirement
   5. verify the USDC transfer on Base Sepolia, then agentgov::settle with its tx hash;
      if the vendor did not deliver, agentgov::fail releases the budget.
+
+With PAYER_MODE=mpc the gateway holds no payer key: step 4 becomes agentgov::requestsig and the
+MPC network's signature. A signed authorization is a payment until its validBefore, so it is never
+failed: it is settled, or, once expired unused, released by agentgov's attester.
 """
 import asyncio
 import hashlib
@@ -20,7 +24,8 @@ import time
 from dataclasses import dataclass
 
 from .journal import Journal
-from .payments import BaseVerifier, PaymentNotSent, X402Payer, same_requirement
+from .mpc import TableSignatures
+from .payments import BaseVerifier, MpcPayer, PaymentNotSent, X402Payer, same_requirement
 from .spring import Spring
 
 log = logging.getLogger("gateway")
@@ -28,7 +33,8 @@ log = logging.getLogger("gateway")
 RETRYABLE = {"invalid_exact_evm_transaction_failed"}   # facilitator could not execute the transfer
 MAX_ATTEMPTS = 3
 STATUS = {1: "authorized", 2: "pending_approval", 3: "approved", 4: "rejected",
-          5: "settled", 6: "failed", 7: "expired"}
+          5: "settled", 6: "failed", 7: "expired", 8: "signed"}
+SIGNED = 8
 # agentgov::settle errors that retrying cannot fix
 SETTLE_PERMANENT = ("unknown request", "not your request", "not authorized for payment",
                     "invalid transaction id", "network does not match vendor", "transaction already recorded")
@@ -60,6 +66,7 @@ class Config:
     usdc: str
     payer_key: str
     journal_path: str
+    payer_mode: str = "key"     # "key": PAYER_PRIVATE_KEY on this machine; "mpc": no key, agentgov + MPC sign
 
     @classmethod
     def from_env(cls, files=None):
@@ -71,8 +78,8 @@ class Config:
         e = os.environ
         return cls(e["CHAIN_URL"], e["CONTRACT"], e["AGENT"], e.get("PERMISSION", "gw"), e["GW_WALLET"],
                    e["GW_WALLET_PW_FILE"], e.get("NETWORK", "eip155:84532"), e.get("RPC", "https://sepolia.base.org"),
-                   e.get("USDC", "0x036CbD53842c5426634e7929541eC2318f3dCF7e"), e["PAYER_PRIVATE_KEY"],
-                   e.get("JOURNAL", f"journal-{e['AGENT']}.sqlite"))
+                   e.get("USDC", "0x036CbD53842c5426634e7929541eC2318f3dCF7e"), e.get("PAYER_PRIVATE_KEY", ""),
+                   e.get("JOURNAL", f"journal-{e['AGENT']}.sqlite"), e.get("PAYER_MODE", "key"))
 
 
 def usdc(micro):
@@ -80,10 +87,18 @@ def usdc(micro):
 
 
 class Gateway:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, signatures=None):
         self.cfg = cfg
         self.spring = Spring(cfg.chain_url, cfg.contract, cfg.wallet, cfg.wallet_pw_file)
-        self.payer = X402Payer(cfg.payer_key, cfg.network)
+        if cfg.payer_mode == "mpc":
+            if signatures is None:
+                mpc = (self.spring.table("mpccfg", limit=1) or [{}])[0].get("mpc")
+                if not mpc:
+                    raise ValueError("PAYER_MODE=mpc, but agentgov has no MPC contract set (setmpc)")
+                signatures = TableSignatures(Spring(cfg.chain_url, mpc))
+            self.payer = MpcPayer(self.spring, cfg.agent, cfg.permission, cfg.network, signatures)
+        else:
+            self.payer = X402Payer(cfg.payer_key, cfg.network)
         self.base = BaseVerifier(cfg.rpc, cfg.usdc)
         self.journal = Journal(cfg.journal_path)
         pol = self.spring.table("policies", lower=cfg.agent, upper=cfg.agent, limit=1)
@@ -198,7 +213,7 @@ class Gateway:
         attempts, found_tx = [], None
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
-                r, settle, auth_nonce = await self.payer.pay(url, pr, acc)
+                r, settle, auth_nonce = await self.payer.pay(url, pr, acc, req_id)
             except PaymentNotSent as e:
                 if attempts:   # an earlier attempt was sent: let the reconciler resolve it
                     self.journal.update(nonce, phase="payment_unknown", error=str(e)[:500])
@@ -259,6 +274,12 @@ class Gateway:
             reason += f": {settle.error_reason or settle.error_message}"
         if len(attempts) > 1:
             reason += f" (after {len(attempts)} attempts)"
+        if self.payer.signs_on_chain:
+            # The signed authorization can still be executed until its validBefore: the reconciler
+            # settles it if it was, and otherwise leaves its budget to agentgov's attester.
+            self.journal.update(nonce, phase="payment_unknown", error=reason)
+            return {"status": "failed", "request_id": req_id,
+                    "reason": reason + "; the signed amount stays reserved until the authorization expires"}
         await self._push_confirmed("fail", [self.cfg.agent, req_id, reason[:120]])
         self.journal.update(nonce, phase="failed", error=reason)
         return {"status": "failed", "request_id": req_id, "reason": reason}
@@ -359,6 +380,11 @@ class Gateway:
         now = time.time()
         for j in self.journal.by_phase("payment_unknown", "paying", "authorized"):
             acc = json.loads(j["accepted"])
+            if self.payer.signs_on_chain and j["req_id"] is not None:
+                row = await asyncio.to_thread(self.spring.req_by_id, j["req_id"])
+                if row and row["status"] == SIGNED:
+                    await self._reconcile_signed(j, acc, row)
+                    continue
             # A signed x402 payment can still settle until maxTimeoutSeconds has passed, so a
             # payment in flight is never declared failed before then.
             if now - j["updated"] < int(acc.get("maxTimeoutSeconds", 300)) + 60:
@@ -390,3 +416,20 @@ class Gateway:
                                     error="no payment found on chain")
             elif row:
                 self.journal.update(j["nonce"], phase=STATUS.get(row["status"], j["phase"]))
+
+    async def _reconcile_signed(self, j, acc, row):
+        """An MPC-signed request: its outcome is final only once validBefore has passed. Then the
+        authorization either was executed (settle it) or can never be (the attester releases it)."""
+        sig = await asyncio.to_thread(self.spring.table, "sigreqs", lower=row["id"], upper=row["id"], limit=1)
+        if not sig or time.time() < int(sig[0]["valid_before"]) + 30:
+            return
+        tx = await asyncio.to_thread(self.base.authorization_used, self.payer.address, "0x" + sig[0]["nonce"],
+                                     j["base_block"] or 0)
+        if tx:
+            ok, _ = await asyncio.to_thread(self.base.verify, tx, self.payer.address, acc["payTo"], j["amount"])
+            if ok:
+                res = await self._settle(row["id"], acc["network"], tx)
+                self.journal.update(j["nonce"], ext_tx=tx, phase="settled" if res["ok"] else "paid_not_recorded")
+                return
+        self.journal.update(j["nonce"], phase="signed_unused",
+                            error="authorization expired unused; agentgov's attester releases its budget")
