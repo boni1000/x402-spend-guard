@@ -16,6 +16,16 @@
   a demo rehearsal on Jungle4; three regression tests cover it.
 
 ### Added
+- **MPC mode (experimental): no payer key on the gateway.** With `PAYER_MODE=mpc`, agentgov's new
+  `requestsig` builds the EIP-3009 authorization of an authorized request from its own tables
+  (payer, whitelisted vendor, amount, validity, a nonce per request) and asks an MPC signing
+  contract to sign it; the gateway only checks the result and sends it to the vendor. A signed
+  request keeps its budget: only a separate attester can release it, after its `validBefore`.
+  The auditor's new check C compares every signed authorization with USDC's `authorizationState`.
+  Built against a mock of the interface Alcor announced for its MPC network
+  (`tests/chain/mockmpc`), and tested on a throwaway Spring dev chain (`tests/chain`, skipped in
+  CI) and, for the signature, by the x402.org facilitator on Base Sepolia. Existing deployments
+  are unaffected: the new settings live in new tables. See SECURITY.md before using it.
 - **Demo video** (`docs/demo.mp4`, linked from the README): three minutes on the Jungle4 deployment.
 - **Live demo on the public Jungle4 testnet** (contract `spendguard11`), with notes on deploying
   there: accounts and CPU through PowerUp, and the RAM the contract needs.
