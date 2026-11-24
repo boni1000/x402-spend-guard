@@ -6,6 +6,12 @@
      whitelisted address of exactly the authorized amount, made after the request was created.
   B. Every USDC transfer out of the payer (from --from-block) has a SETTLED record with that tx.
      This catches payments that bypassed the governance gateway.
+  C. MPC mode: every authorization agentgov had signed agrees with USDC's authorizationState: a
+     settled one was executed, one the attester released was not, and none was executed without
+     being recorded. This catches an attester that releases the budget of a payment that happened.
+
+In MPC mode each agent pays from its own address (agentgov's payers table); A and B use those
+addresses as well as --payer.
 
 Prints a report and a Merkle root over the audited records. With --anchor the result is published
 on chain with agentgov::logaudit, signed by the auditor's own account (run it on a machine other
@@ -37,6 +43,40 @@ def all_rows(spring, table, from_id=0):
         lower = r["next_key"]
 
 
+def optional_rows(spring, table, from_id=0):
+    """Rows of a table that older agentgov deployments do not have (the MPC tables). Only a table
+    missing from the contract's ABI counts as empty; any other error stops the audit."""
+    abi = spring._post("/v1/chain/get_abi", {"account_name": spring.contract})["abi"]
+    if table not in {t["name"] for t in abi.get("tables", [])}:
+        return []
+    return all_rows(spring, table, from_id)
+
+
+SETTLED, FAILED, SIGNED = 5, 6, 8
+
+
+def check_signed(reqs, sigreqs, base, now):
+    """C. Each MPC-signed authorization against USDC's authorizationState(payer, nonce).
+    Returns (problems, notes)."""
+    problems, notes = [], []
+    by_id = {r["id"]: r for r in reqs}
+    for s in sigreqs:
+        r = by_id.get(s["id"])
+        if r is None:
+            continue
+        used = base.authorization_state(s["payer"], "0x" + s["nonce"])
+        expired = now > int(s["valid_before"])
+        if r["status"] == SETTLED and not used:
+            problems.append(f"request {r['id']}: settled, but USDC never executed its signed authorization")
+        elif r["status"] == FAILED and used:
+            problems.append(f"request {r['id']}: released by the attester, but its signed authorization was executed")
+        elif r["status"] == SIGNED and expired and used:
+            problems.append(f"request {r['id']}: its signed authorization was executed but never recorded (no settle)")
+        elif r["status"] == SIGNED and expired:
+            notes.append(f"request {r['id']}: expired unused, waiting for the attester to release it")
+    return problems, notes
+
+
 def merkle_root(leaves):
     level = [bytes.fromhex(h) for h in leaves] or [b"\0" * 32]
     while len(level) > 1:
@@ -62,11 +102,12 @@ def main():
     spring = Spring(os.environ["CHAIN_URL"], os.environ["CONTRACT"])
     base = BaseVerifier(os.environ.get("RPC", "https://sepolia.base.org"),
                         os.environ.get("USDC", "0x036CbD53842c5426634e7929541eC2318f3dCF7e"))
-    if not a.payer:
+    mpc_payers = {p["address"].lower() for p in optional_rows(spring, "payers")}
+    if not a.payer and not mpc_payers:
         sys.exit("set PAYER_ADDRESS or --payer")
     if a.from_block is None:
         a.from_block = max(0, base.block_number() - 43200)   # ~1 day of 2-second blocks
-    payer = a.payer.lower()
+    payers = mpc_payers | ({a.payer.lower()} if a.payer else set())
     if a.incremental:
         mine = [x for x in all_rows(spring, "audits") if x["auditor"] == a.auditor]
         if mine:
@@ -78,14 +119,20 @@ def main():
                   f"blocks >= {a.from_block})")
     vendors = {v["id"]: v for v in all_rows(spring, "vendors")}
     reqs = all_rows(spring, "payreqs", a.from_id)
-    settled = [r for r in reqs if r["status"] == 5]
-    print(f"Audit of {spring.contract} requests >= {a.from_id}: {len(reqs)} records, {len(settled)} settled; "
-          f"payer {a.payer}")
+    sigreqs = optional_rows(spring, "sigreqs", a.from_id)
+    signed_payer = {s["id"]: s["payer"].lower() for s in sigreqs}
+    settled = [r for r in reqs if r["status"] == SETTLED]
+    print(f"Audit of {spring.contract} requests >= {a.from_id}: {len(reqs)} records, {len(settled)} settled, "
+          f"{len(sigreqs)} MPC-signed; payers {', '.join(sorted(payers))}")
 
     problems, leaves, total = [], [], 0
     print("\nA. Every settled record matches a real payment")
     for r in settled:
         tx, v = r["ext_txid"], vendors[r["vendor_id"]]
+        payer = signed_payer.get(r["id"]) or (a.payer or "").lower()
+        if not payer:
+            problems.append(f"request {r['id']}: no payer address to check it against (--payer)")
+            continue
         try:
             rcpt = base.w3.eth.get_transaction_receipt(tx)
         except Exception as e:  # noqa: BLE001
@@ -107,14 +154,24 @@ def main():
             leaves.append(hashlib.sha256(leaf.encode()).hexdigest())
     print(f"   {len(leaves)} of {len(settled)} settled records verified, total {total / 1e6:.2f} USDC")
 
-    print("\nB. Every payment out of the payer has a settled record")
-    transfers = base.transfers(payer, a.from_block)
+    print("\nB. Every payment out of the payers has a settled record")
+    transfers = {}
+    for payer in sorted(payers):
+        transfers.update(base.transfers(payer, a.from_block))
     recorded = {r["ext_txid"].lower() for r in settled}
     unrecorded = {tx: t for tx, t in transfers.items() if tx not in recorded}
     for tx, (to, value, blk) in unrecorded.items():
         problems.append(f"transfer {tx} ({value / 1e6:.2f} USDC to {to}, block {blk}) has no settled record")
     print(f"   {len(transfers) - len(unrecorded)} of {len(transfers)} transfers since block {a.from_block} "
           f"are recorded on agentgov")
+
+    if sigreqs:
+        print("\nC. Every MPC-signed authorization agrees with USDC's authorizationState")
+        c_problems, notes = check_signed(reqs, sigreqs, base, time.time())
+        problems += c_problems
+        print(f"   {len(sigreqs) - len(c_problems)} of {len(sigreqs)} signed authorizations consistent")
+        for n in notes:
+            print("   note:", n)
 
     print("\nResult:", "CLEAN" if not problems else f"{len(problems)} PROBLEM(S)")
     for p in problems:

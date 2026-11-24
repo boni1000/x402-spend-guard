@@ -24,6 +24,9 @@ from x402.schemas import PaymentPayload
 
 TRANSFER_TOPIC = Web3.keccak(text="Transfer(address,address,uint256)")
 AUTH_USED_TOPIC = Web3.keccak(text="AuthorizationUsed(address,bytes32)")   # EIP-3009, emitted by USDC
+AUTH_STATE_ABI = [{"name": "authorizationState", "type": "function", "stateMutability": "view",
+                   "inputs": [{"name": "authorizer", "type": "address"}, {"name": "nonce", "type": "bytes32"}],
+                   "outputs": [{"name": "", "type": "bool"}]}]
 
 
 def _pad(address):
@@ -262,6 +265,13 @@ class BaseVerifier:
                                             "topics": [AUTH_USED_TOPIC, _pad(authorizer), nonce]}):
                 return "0x" + lg["transactionHash"].hex().removeprefix("0x").lower()
         return None
+
+    def authorization_state(self, authorizer, nonce):
+        """USDC's own record: True once the EIP-3009 authorization with this nonce was executed (or
+        cancelled by its signer). After its validBefore, False means it can never be executed."""
+        usdc = self.w3.eth.contract(address=self.usdc, abi=AUTH_STATE_ABI)
+        return usdc.functions.authorizationState(Web3.to_checksum_address(authorizer),
+                                                 bytes.fromhex(nonce.removeprefix("0x"))).call()
 
     def find_transfer(self, payer, pay_to, amount, from_block):
         """Find a matching transfer since from_block (used by the reconciler)."""

@@ -41,8 +41,8 @@ Whatever can make that network sign for agentgov controls everything those addre
 - **The attester** (`setmpc`) is the only account that can release the budget of a signed request,
   and only after its `validBefore` has passed. One that lies about an executed authorization lets the
   agent spend that amount again on the same day. Use an account that is not an agent and not run on
-  the gateway machine. The auditor does not yet check the attester's reports against USDC's
-  `authorizationState`.
+  the gateway machine. The auditor (check C) compares every release with USDC's
+  `authorizationState` and reports such a lie; it detects it, it does not prevent it.
 - **Signatures are public** once the MPC network answers. Anyone can submit one to USDC before its
   `validBefore`, but it pays only the whitelisted vendor and only the authorized amount. The budget
   already counts it as spent. Keep `sig_ttl_sec` short (about 120 s; the facilitator needs at least
