@@ -6,22 +6,17 @@ The requestsig digest is compared with eth_account's EIP-712 hash, so a digest t
 what an EVM wallet signs fails here, not on Base.
 """
 import json
-import os
 import random
-import shlex
-import subprocess
 import time
-from pathlib import Path
 
 import pytest
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 from eth_utils import keccak
 
+from devclient import CLEOS, ChainError, cleos
 from spend_guard.spring import name_to_u64
 
-CLEOS = os.environ.get("AGENTGOV_CLEOS")
-SSH = os.environ.get("AGENTGOV_SSH")
 pytestmark = pytest.mark.skipif(not CLEOS, reason="set AGENTGOV_CLEOS to run against a dev chain")
 
 CONTRACT, ADMIN, APPROVER, ATTESTER = "agentgov", "admin1", "approver1", "attester1"
@@ -31,27 +26,6 @@ PAYER = Account.from_key(keccak(b"agentgov devchain payer"))   # stands in for t
 SIG_TTL = 10
 DEV_KEY = "EOS6MRyAjQq8ud7hVNYcfnVPJqcVpscN5So8BhtHuGYqET5GDW5CV"   # devchain.sh's well-known key
 AUTHORIZED, PENDING, APPROVED, SETTLED, FAILED, SIGNED = 1, 2, 3, 5, 6, 8
-
-
-class ChainError(Exception):
-    pass
-
-
-def cleos(*args):
-    line = CLEOS + " " + " ".join(shlex.quote(str(a)) for a in args)
-    if SSH:
-        cmd = ["ssh", "-o", "ControlMaster=auto", "-o", f"ControlPath={Path.home()}/.ssh/agentgov-%C",
-               "-o", "ControlPersist=120", SSH, line]
-    else:
-        cmd = ["bash", "-c", line]
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    if p.returncode != 0:
-        try:   # with -j a refused transaction comes back as JSON on stdout
-            stack = json.loads(p.stdout)["processed"]["except"]["stack"]
-            raise ChainError(" | ".join(str(s.get("data", {}).get("s") or s.get("format", "")) for s in stack))
-        except (ValueError, KeyError, TypeError):
-            raise ChainError(p.stderr or p.stdout) from None
-    return p.stdout
 
 
 def push(action, data, actor):

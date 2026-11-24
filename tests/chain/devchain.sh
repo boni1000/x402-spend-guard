@@ -7,6 +7,9 @@
 #   CONTRACT_DIR=~/agentgov-build ./devchain.sh start      # fresh chain + agentgov deployed
 #   ./devchain.sh stop
 #
+# CONTRACT_DIR holds agentgov.wasm/.abi and, optionally, mockmpc.wasm/.abi (tests/chain/mockmpc),
+# which is deployed as the stand-in MPC contract on account mpc1.
+#
 # Everything lives in $DEVCHAIN_DIR (default ~/agentgov-devchain): its own data, nodeos on
 # 127.0.0.1:18888 (p2p 19876, no peers) and its own keosd on 127.0.0.1:18900. It uses the
 # well-known development key, so it must never be connected to another network. Processes are
@@ -74,6 +77,10 @@ for f in json.load(sys.stdin):
   for a in $ACCOUNTS; do $cl create account eosio "$a" "$PUB" "$PUB" >/dev/null; done
   sleep 1
   $cl set contract agentgov "$CONTRACT_DIR" agentgov.wasm agentgov.abi -p agentgov@active >/dev/null
+  $cl set account permission agentgov active --add-code -p agentgov@active >/dev/null   # inline sign
+  if [ -f "$CONTRACT_DIR/mockmpc.wasm" ]; then
+    $cl set contract mpc1 "$CONTRACT_DIR" mockmpc.wasm mockmpc.abi -p mpc1@active >/dev/null
+  fi
   echo "dev chain ready at $URL (wallet $WALLET); accounts: $ACCOUNTS"
 }
 

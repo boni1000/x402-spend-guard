@@ -8,6 +8,7 @@ from eth_utils import keccak
 from x402.http import decode_payment_signature_header, encode_payment_signature_header
 from x402.schemas import PaymentRequired
 
+from spend_guard.mpc import TableSignatures
 from spend_guard.payments import MpcPayer, authorization_digest
 from spend_guard.spring import name_to_u64
 from test_gateway import NET, USDC, VENDOR, FakeBase, FakeChain, make_gateway, req
@@ -176,3 +177,29 @@ async def test_reconciler_waits_for_valid_before_then_settles_or_leaves_it_to_th
             assert phase == "settled" and actions(chain)[-1] == "settle"
         else:
             assert phase == "signed_unused" and "fail" not in actions(chain)
+
+
+class SignaturesTable:
+    def __init__(self, rows):
+        self.rows, self.calls = rows, []
+
+    def table(self, name, lower=None, upper=None, index=None, key_type=None, limit=100):
+        self.calls.append((name, index, key_type))
+        return [r for r in self.rows if r["payload"] >= lower][:limit]
+
+
+async def test_table_signatures_finds_the_signature_by_its_payload():
+    digest = "ab" * 32
+    table = SignaturesTable([{"id": 7, "payload": digest, "r": "11" * 32, "s": "22" * 32, "v": 28}])
+    sig = await TableSignatures(table).wait(3, digest, timeout=1)
+    assert sig == "0x" + "11" * 32 + "22" * 32 + "1c"
+    assert table.calls[0] == ("signatures", 2, "sha256")
+
+
+async def test_table_signatures_ignores_a_neighbouring_payload_and_times_out():
+    table = SignaturesTable([{"id": 7, "payload": "ac" * 32, "r": "11" * 32, "s": "22" * 32, "v": 27}])
+    try:
+        await TableSignatures(table, poll=0.05).wait(3, "ab" * 32, timeout=0.2)
+    except TimeoutError:
+        return
+    raise AssertionError("expected TimeoutError")

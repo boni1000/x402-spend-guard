@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass
 
 from .journal import Journal
+from .mpc import TableSignatures
 from .payments import BaseVerifier, MpcPayer, PaymentNotSent, X402Payer, same_requirement
 from .spring import Spring
 
@@ -91,7 +92,10 @@ class Gateway:
         self.spring = Spring(cfg.chain_url, cfg.contract, cfg.wallet, cfg.wallet_pw_file)
         if cfg.payer_mode == "mpc":
             if signatures is None:
-                raise ValueError("PAYER_MODE=mpc needs a signature source")
+                mpc = (self.spring.table("mpccfg", limit=1) or [{}])[0].get("mpc")
+                if not mpc:
+                    raise ValueError("PAYER_MODE=mpc, but agentgov has no MPC contract set (setmpc)")
+                signatures = TableSignatures(Spring(cfg.chain_url, mpc))
             self.payer = MpcPayer(self.spring, cfg.agent, cfg.permission, cfg.network, signatures)
         else:
             self.payer = X402Payer(cfg.payer_key, cfg.network)

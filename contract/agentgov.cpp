@@ -401,7 +401,11 @@ public:
          s.valid_before = valid_before; s.nonce = checksum256(nonce); s.digest = digest; s.requested = now();
       });
       reqs.modify(r, same_payer, [&](auto& x) { x.status = SIGNED; x.updated = now(); });
-      // The request to the MPC network (mc.mpc, path = agent) is added once its interface is final.
+      // The MPC network signs once this transaction is irreversible, with the key of (this
+      // contract, agent). Interface as Alcor announced it; agentgov@active needs eosio.code.
+      if (mc.mpc != name())
+         action(permission_level{get_self(), "active"_n}, mc.mpc, "sign"_n,
+                std::make_tuple(get_self(), agent.to_string(), digest, uint8_t(0))).send();
       return sig_request{id, digest, checksum256(nonce), valid_before};
    }
 
