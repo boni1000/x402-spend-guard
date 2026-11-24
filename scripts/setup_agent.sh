@@ -6,7 +6,7 @@
 #
 # Amounts are in micro-USDC (1000000 = 1 USDC). Needs, in an unlocked keosd wallet: the agent's
 # active key (to create the gw permission and link it) and the admin's key (regagent, setpolicy).
-# The gw permission can then call only authorize, settle, fail and expire on the contract.
+# The gw permission can then call only authorize, requestsig, settle, fail and expire on the contract.
 #
 # Each step waits until the API node shows the previous one: a public endpoint may route the next
 # request to a node that has not applied the last transaction yet ("Permission Query Exception").
@@ -31,7 +31,7 @@ has_agent_row() { $CL get table "$CONTRACT" "$CONTRACT" agents -L "$AGENT" -U "$
 
 $CL set account permission "$AGENT" gw "$GWKEY" active -p "$AGENT@active"
 wait_for "gw permission on $AGENT" has_permission gw
-for action in authorize settle fail expire; do
+for action in authorize requestsig settle fail expire; do
   $CL set action permission "$AGENT" "$CONTRACT" "$action" gw -p "$AGENT@active"
   wait_for "link $CONTRACT::$action to $AGENT@gw" has_link "$action"
 done
